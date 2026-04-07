@@ -1,0 +1,72 @@
+name: Auto Deploy (Staging + Production)
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-south-1
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Backend
+        run: pip install -r requirements.txt
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ap-south-1
+
+      - name: Set Env
+        run: |
+          if [ "${GITHUB_REF##*/}" = "main" ]; then
+            echo "BUCKET=prod-bucket" >> $GITHUB_ENV
+            echo "EC2=${{ secrets.PROD_EC2_HOST }}" >> $GITHUB_ENV
+          else
+            echo "BUCKET=staging-bucket" >> $GITHUB_ENV
+            echo "EC2=${{ secrets.EC2_HOST }}" >> $GITHUB_ENV
+          fi
+
+      - name: Upload to S3
+        run: aws s3 sync frontend/build/ s3://$BUCKET --delete
+
+      - name: Deploy Backend
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ env.EC2 }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/app
+            git pull
+            source venv/bin/activate
+            pip install -r requirements.txt
+            python manage.py migrate
+            sudo systemctl restart gunicorn
+            sudo systemctl restart celery
